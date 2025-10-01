@@ -1,12 +1,9 @@
 import os
-import gradio as gr
+import streamlit as st
 from huggingface_hub import InferenceClient
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-
-# HF_TOKEN = os.environ["HF_TOKEN"]  # <- this is from the Space secrets
-
 
 # ======== Sample Training Documents ========
 enhanced_sample_texts = {
@@ -49,9 +46,6 @@ embeddings = embedder.encode(corpus, convert_to_numpy=True)
 index = faiss.IndexFlatL2(embeddings.shape[1])
 index.add(embeddings)
 
-chat_history = []
-VERBOSE = True
-
 # ======== System message enforcing detailed "I don't know" fallback ========
 SYSTEM_MESSAGE = (
     "You are a helpful assistant. Only answer based on the provided context. "
@@ -60,65 +54,70 @@ SYSTEM_MESSAGE = (
     "if it doesn't know based off of the retrieved context.'"
 )
 
+# ======== Streamlit UI Config ========
+st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="centered")
+st.title("🤖 Multi-Turn RAG Chatbot Demo")
+st.markdown("Ask questions about **space missions, landmarks, programming, science, or historical events.**")
+
+# Hugging Face token input
+hf_token = st.text_input("Enter your HuggingFace Token:", type="password")
+
+# Slider controls (like in Gradio)
+max_tokens = st.slider("Max new tokens", min_value=1, max_value=2048, value=512, step=1)
+temperature = st.slider("Temperature", min_value=0.0, max_value=4.0, value=0.0, step=0.1)
+top_p = st.slider("Top-p (nucleus sampling)", min_value=0.1, max_value=1.0, value=0.95, step=0.05)
+
+# Initialize chat history in Streamlit session state
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 # ======== RAG + HF Chat Function ========
-def respond(message, history: list[dict[str, str]], system_message, max_tokens, temperature, top_p, hf_token: gr.OAuthToken):
-    global chat_history
+def rag_respond(message, hf_token, history, system_message, max_tokens, temperature, top_p):
+    client = InferenceClient(token=hf_token, model="openai/gpt-oss-20b")
 
-    # Use the token from user OAuth login, not from Spaces secrets
-    client = InferenceClient(token=hf_token.token, model="openai/gpt-oss-20b")
-
-    # Combine previous queries/answers
+    # Combine previous Q&A
     history_text = ""
-    for q, a in chat_history[-3:]:
+    for q, a in history[-3:]:
         history_text += f"Previous Q: {q}\nPrevious A: {a}\n"
 
     # FAISS retrieval
-    retrieval_query = " ".join([f"{q} {a}" for q, a in chat_history[-3:]] + [message])
+    retrieval_query = " ".join([f"{q} {a}" for q, a in history[-3:]] + [message])
     q_emb = embedder.encode([retrieval_query], convert_to_numpy=True)
     D, I = index.search(q_emb, k=5)
     retrieved_chunks = [(corpus[i], sources[i], D[0][j]) for j, i in enumerate(I[0])]
     context_text = "\n".join([f"[{src}] {chunk}" for chunk, src, _ in retrieved_chunks])
 
-    if VERBOSE:
-        print(f"\n=== Processing Query: {message} ===")
-        for chunk, src, score in retrieved_chunks:
-            print(f"[{src}] Score: {score:.4f} | {chunk}")
-        import sys; sys.stdout.flush()
-
     # Build messages for HF API
-    messages_list = [{"role": "system", "content": SYSTEM_MESSAGE}]
-    messages_list.extend(history)
+    messages_list = [{"role": "system", "content": system_message}]
+    for q, a in history:
+        messages_list.append({"role": "user", "content": q})
+        messages_list.append({"role": "assistant", "content": a})
     messages_list.append({"role": "user", "content": f"{history_text}\nCurrent Query: {message}\nContext:\n{context_text}"})
 
+    # Collect response
     response_text = ""
     for chunk in client.chat_completion(messages_list, max_tokens=max_tokens, stream=True, temperature=temperature, top_p=top_p):
         if len(chunk.choices) and chunk.choices[0].delta.content:
             response_text += chunk.choices[0].delta.content
-            yield response_text
 
-    chat_history.append((message, response_text))
+    return response_text
 
-# ======== Gradio Interface ========
-chatbot = gr.ChatInterface(
-    respond,
-    type="messages",
-    additional_inputs=[
-        gr.Textbox(value="You are a friendly Chatbot.", label="System message"),
-        gr.Slider(minimum=1, maximum=2048, value=512, step=1, label="Max new tokens"),
-        gr.Slider(minimum=0.0, maximum=4.0, value=0.0, step=0.1, label="Temperature"),
-        gr.Slider(minimum=0.1, maximum=1.0, value=0.95, step=0.05, label="Top-p (nucleus sampling)")
-    ],
-    title="Multi-Turn RAG Demo (HF GPT-OSS-20B)",
-    description=(
-        "Ask questions about space missions, landmarks, programming, science, or historical events.\n"
-        "Try also asking it questions not in the vector database to demonstrate that it will not hallucinate."
-    )
-)
+# ======== Streamlit Chat Loop ========
+for q, a in st.session_state.chat_history:
+    with st.chat_message("user"):
+        st.write(q)
+    with st.chat_message("assistant"):
+        st.write(a)
 
-with gr.Blocks() as demo:
-    with gr.Sidebar():
-        gr.LoginButton()
-    chatbot.render()
-
-if __name__ == "__main__":
-    demo.launch()
+if prompt := st.chat_input("Ask me something..."):
+    if not hf_token:
+        st.warning("Please enter your HuggingFace token above first.")
+    else:
+        with st.chat_message("user"):
+            st.write(prompt)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = rag_respond(prompt, hf_token, st.session_state.chat_history,
+                                       SYSTEM_MESSAGE, max_tokens, temperature, top_p)
+                st.write(response)
+        st.session_state.chat_history.append((prompt, response))
