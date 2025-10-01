@@ -4,6 +4,9 @@ from huggingface_hub import InferenceClient
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
+import streamlit as st
+
+HF_API_KEY = st.secrets["HF_API_KEY"]
 
 # ======== Sample Training Documents ========
 enhanced_sample_texts = {
@@ -60,7 +63,7 @@ st.title("🤖 Multi-Turn RAG Chatbot Demo")
 st.markdown("Ask questions about **space missions, landmarks, programming, science, or historical events.**")
 
 # Hugging Face token input
-hf_token = st.text_input("Enter your HuggingFace Token:", type="password")
+hf_token = HF_API_KEY
 
 # Slider controls (like in Gradio)
 max_tokens = st.slider("Max new tokens", min_value=1, max_value=2048, value=512, step=1)
